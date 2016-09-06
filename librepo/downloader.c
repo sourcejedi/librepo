@@ -1303,11 +1303,11 @@ list_of_checksums_to_str(GSList *checksums)
 
 
 static gboolean
-check_finished_trasfer_checksum(int fd,
-                                GSList *checksums,
-                                gboolean *checksum_matches,
-                                GError **transfer_err,
-                                GError **err)
+check_finished_transfer_checksum(int fd,
+                                 GSList *checksums,
+                                 gboolean *checksum_matches,
+                                 GError **transfer_err,
+                                 GError **err)
 {
     gboolean matches = TRUE;
     GSList *calculated_chksums = NULL;
@@ -1581,11 +1581,11 @@ check_transfer_statuses(LrDownload *dd, GError **err)
         //
         fflush(target->f);
         fd = fileno(target->f);
-        ret = check_finished_trasfer_checksum(fd,
-                                              target->target->checksums,
-                                              &matches,
-                                              &transfer_err,
-                                              &tmp_err);
+        ret = check_finished_transfer_checksum(fd,
+                                               target->target->checksums,
+                                               &matches,
+                                               &transfer_err,
+                                               &tmp_err);
         if (!ret) { // Error
             g_propagate_prefixed_error(err, tmp_err, "Downloading from %s"
                     "was successful but error encountered while "
