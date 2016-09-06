@@ -508,7 +508,7 @@ END_TEST
 
 START_TEST(test_write_repoconf)
 {
-    _cleanup_file_close_ int rc = -1;
+    _cleanup_fd_close_ int rc = -1;
     gboolean ret;
     LrYumRepoConfs *confs;
     LrYumRepoConf * conf;
