@@ -1309,6 +1309,7 @@ check_finished_transfer_checksum(int fd,
                                  GError **transfer_err,
                                  GError **err)
 {
+    gboolean ret = TRUE;
     gboolean matches = TRUE;
     GSList *calculated_chksums = NULL;
 
@@ -1329,7 +1330,7 @@ check_finished_transfer_checksum(int fd,
                                               &calculated,
                                               err);
         if (!ret)
-            return FALSE;
+            goto cleanup;
 
         // Store calculated checksum
         calculated_chksum = lr_downloadtargetchecksum_new(chksum->type,
@@ -1365,10 +1366,11 @@ check_finished_transfer_checksum(int fd,
                 "Calculated: %s Expected: %s", calculated, expected);
     }
 
+cleanup:
     g_slist_free_full(calculated_chksums,
                       (GDestroyNotify) lr_downloadtargetchecksum_free);
 
-    return TRUE;
+    return ret;
 }
 
 
