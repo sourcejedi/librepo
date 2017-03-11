@@ -1322,13 +1322,13 @@ check_finished_transfer_checksum(int fd,
             continue;  // Bad checksum
 
         lseek(fd, 0, SEEK_SET);
-        gboolean ret = lr_checksum_fd_compare(chksum->type,
-                                              fd,
-                                              chksum->value,
-                                              1,
-                                              &matches,
-                                              &calculated,
-                                              err);
+        ret = lr_checksum_fd_compare(chksum->type,
+                                     fd,
+                                     chksum->value,
+                                     1,
+                                     &matches,
+                                     &calculated,
+                                     err);
         if (!ret)
             goto cleanup;
 
