@@ -931,10 +931,9 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
     }
 
     // Prepare FILE
-    FILE *f = open_target_file(target, err);
-    if (!f)
+    target->f = open_target_file(target, err);
+    if (!target->f)
         goto fail;
-    target->f = f;
     target->writecb_recieved = 0;
     target->writecb_required_range_written = FALSE;
 
