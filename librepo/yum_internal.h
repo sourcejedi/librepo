@@ -31,6 +31,9 @@ G_BEGIN_DECLS
 
 gboolean
 lr_yum_perform(LrHandle *handle, LrResult *result, GError **err);
+gboolean
+lr_yum_download_url(LrHandle *lr_handle, const char *url, int fd,
+                    gboolean no_cache, gboolean is_zchunk, GError **err);
 
 G_END_DECLS
 

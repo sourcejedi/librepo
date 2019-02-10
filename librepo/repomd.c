@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <expat.h>
+#include <libxml/parser.h>
 #include <errno.h>
 
 #include "repomd.h"
@@ -55,7 +55,7 @@ lr_yum_repomdrecord_free(LrYumRepoMdRecord *rec)
 }
 
 LrYumRepoMd *
-lr_yum_repomd_init()
+lr_yum_repomd_init(void)
 {
     LrYumRepoMd *repomd = lr_malloc0(sizeof(*repomd));
     repomd->chunk = g_string_chunk_new(32);
@@ -127,6 +127,7 @@ lr_yum_repomd_get_record(LrYumRepoMd *repomd, const char *type)
 {
     assert(repomd);
     assert(type);
+
     for (GSList *elem = repomd->records; elem; elem = g_slist_next(elem)) {
         LrYumRepoMdRecord *record = elem->data;
         assert(record);
@@ -175,9 +176,11 @@ typedef enum {
     STATE_LOCATION,
     STATE_CHECKSUM,
     STATE_OPENCHECKSUM,
+    STATE_HEADERCHECKSUM,
     STATE_TIMESTAMP,
     STATE_SIZE,
     STATE_OPENSIZE,
+    STATE_HEADERSIZE,
     STATE_DBVERSION,
     NUMSTATES
 } LrRepomdState;
@@ -188,29 +191,33 @@ typedef enum {
 * has a "file" element listed first, because it is more frequent
 * than a "version" element). */
 static LrStatesSwitch stateswitches[] = {
-    { STATE_START,      "repomd",           STATE_REPOMD,       0 },
-    { STATE_REPOMD,     "revision",         STATE_REVISION,     1 },
-    { STATE_REPOMD,     "repoid",           STATE_REPOID,       1 },
-    { STATE_REPOMD,     "tags",             STATE_TAGS,         0 },
-    { STATE_REPOMD,     "data",             STATE_DATA,         0 },
-    { STATE_TAGS,       "repo",             STATE_REPO,         1 },
-    { STATE_TAGS,       "content",          STATE_CONTENT,      1 },
-    { STATE_TAGS,       "distro",           STATE_DISTRO,       1 },
-    { STATE_DATA,       "location",         STATE_LOCATION,     0 },
-    { STATE_DATA,       "checksum",         STATE_CHECKSUM,     1 },
-    { STATE_DATA,       "open-checksum",    STATE_OPENCHECKSUM, 1 },
-    { STATE_DATA,       "timestamp",        STATE_TIMESTAMP,    1 },
-    { STATE_DATA,       "size",             STATE_SIZE,         1 },
-    { STATE_DATA,       "open-size",        STATE_OPENSIZE,     1 },
-    { STATE_DATA,       "database_version", STATE_DBVERSION,    1 },
-    { NUMSTATES,        NULL,               NUMSTATES,          0 }
+    { STATE_START,      "repomd",              STATE_REPOMD,         0 },
+    { STATE_REPOMD,     "revision",            STATE_REVISION,       1 },
+    { STATE_REPOMD,     "repoid",              STATE_REPOID,         1 },
+    { STATE_REPOMD,     "tags",                STATE_TAGS,           0 },
+    { STATE_REPOMD,     "data",                STATE_DATA,           0 },
+    { STATE_TAGS,       "repo",                STATE_REPO,           1 },
+    { STATE_TAGS,       "content",             STATE_CONTENT,        1 },
+    { STATE_TAGS,       "distro",              STATE_DISTRO,         1 },
+    { STATE_DATA,       "location",            STATE_LOCATION,       0 },
+    { STATE_DATA,       "checksum",            STATE_CHECKSUM,       1 },
+    { STATE_DATA,       "open-checksum",       STATE_OPENCHECKSUM,   1 },
+    { STATE_DATA,       "header-checksum",     STATE_HEADERCHECKSUM, 1 },
+    { STATE_DATA,       "timestamp",           STATE_TIMESTAMP,      1 },
+    { STATE_DATA,       "size",                STATE_SIZE,           1 },
+    { STATE_DATA,       "open-size",           STATE_OPENSIZE,       1 },
+    { STATE_DATA,       "header-size",         STATE_HEADERSIZE,     1 },
+    { STATE_DATA,       "database_version",    STATE_DBVERSION,      1 },
+    { NUMSTATES,        NULL,                  NUMSTATES,            0 }
 };
 
-static void XMLCALL
-lr_start_handler(void *pdata, const char *element, const char **attr)
+static void
+lr_start_handler(void *pdata, const xmlChar *xmlElement, const xmlChar **xmlAttr)
 {
     LrParserData *pd = pdata;
     LrStatesSwitch *sw;
+    const char **attr = (const char **)xmlAttr;
+    const char *element = (const char *)xmlElement;
 
     if (pd->err)
         return; // There was an error -> do nothing
@@ -348,17 +355,34 @@ lr_start_handler(void *pdata, const char *element, const char **attr)
                                                     val);
         break;
 
+    case STATE_HEADERCHECKSUM:
+        assert(pd->repomd);
+        assert(pd->repomdrecord);
+
+        val = lr_find_attr("type", attr);
+        if (!val) {
+            lr_xml_parser_warning(pd, LR_XML_WARNING_MISSINGATTR,
+                    "Missing attribute \"type\" of an open checksum element");
+            break;
+        }
+
+        pd->repomdrecord->header_checksum_type = g_string_chunk_insert(
+                                                     pd->repomdrecord->chunk,
+                                                     val);
+        break;
+
     case STATE_TIMESTAMP:
     case STATE_SIZE:
     case STATE_OPENSIZE:
+    case STATE_HEADERSIZE:
     case STATE_DBVERSION:
     default:
         break;
     }
 }
 
-static void XMLCALL
-lr_end_handler(void *pdata, G_GNUC_UNUSED const char *element)
+static void
+lr_end_handler(void *pdata, G_GNUC_UNUSED const xmlChar *element)
 {
     LrParserData *pd = pdata;
     unsigned int state = pd->state;
@@ -459,6 +483,15 @@ lr_end_handler(void *pdata, G_GNUC_UNUSED const char *element)
                                             pd->content);
         break;
 
+    case STATE_HEADERCHECKSUM:
+        assert(pd->repomd);
+        assert(pd->repomdrecord);
+
+        pd->repomdrecord->header_checksum = lr_string_chunk_insert(
+                                                pd->repomdrecord->chunk,
+                                                pd->content);
+        break;
+
     case STATE_TIMESTAMP:
         assert(pd->repomd);
         assert(pd->repomdrecord);
@@ -478,6 +511,14 @@ lr_end_handler(void *pdata, G_GNUC_UNUSED const char *element)
         assert(pd->repomdrecord);
 
         pd->repomdrecord->size_open = lr_xml_parser_strtoll(pd, pd->content, 0);
+        break;
+
+    case STATE_HEADERSIZE:
+        assert(pd->repomd);
+        assert(pd->repomdrecord);
+
+        pd->repomdrecord->size_header = lr_xml_parser_strtoll(pd, pd->content,
+                                                              0);
         break;
 
     case STATE_DBVERSION:
@@ -501,7 +542,7 @@ lr_yum_repomd_parse_file(LrYumRepoMd *repomd,
 {
     gboolean ret = TRUE;
     LrParserData *pd;
-    XML_Parser parser;
+    XmlParser parser;
     GError *tmp_err = NULL;
 
     assert(fd >= 0);
@@ -510,9 +551,10 @@ lr_yum_repomd_parse_file(LrYumRepoMd *repomd,
 
     // Init
 
-    parser = XML_ParserCreate(NULL);
-    XML_SetElementHandler(parser, lr_start_handler, lr_end_handler);
-    XML_SetCharacterDataHandler(parser, lr_char_handler);
+    memset(&parser, 0, sizeof(parser));
+    parser.startElement = lr_start_handler;
+    parser.endElement = lr_end_handler;
+    parser.characters = lr_char_handler;
 
     pd = lr_xml_parser_data_new(NUMSTATES);
     pd->parser = &parser;
@@ -525,8 +567,6 @@ lr_yum_repomd_parse_file(LrYumRepoMd *repomd,
             pd->swtab[sw->from] = sw;
         pd->sbtab[sw->to] = sw->from;
     }
-
-    XML_SetUserData(parser, pd);
 
     // Parsing
 
@@ -545,7 +585,6 @@ lr_yum_repomd_parse_file(LrYumRepoMd *repomd,
     // Clean up
 
     lr_xml_parser_data_free(pd);
-    XML_ParserFree(parser);
 
     return ret;
 }

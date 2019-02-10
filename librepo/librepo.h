@@ -28,6 +28,7 @@
 #include "gpg.h"
 #include "handle.h"
 #include "metalink.h"
+#include "metadata_downloader.h"
 #include "package_downloader.h"
 #include "rcodes.h"
 #include "repoconf.h"

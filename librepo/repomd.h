@@ -48,9 +48,12 @@ typedef struct {
     char *checksum_type;        /*!< Type of checksum */
     char *checksum_open;        /*!< Checksum of uncompressed file */
     char *checksum_open_type;   /*!< Type of checksum of uncompressed file */
+    char *header_checksum;      /*!< Checksum of zchunk header */
+    char *header_checksum_type; /*!< Type of checksum of zchunk header */
     gint64 timestamp;           /*!< File timestamp */
     gint64 size;                /*!< File size */
     gint64 size_open;           /*!< Size of uncompressed file */
+    gint64 size_header;         /*!< Size of zchunk header */
     int db_version;             /*!< Version of database */
 
     GStringChunk *chunk;        /*!< String chunk */
@@ -75,7 +78,7 @@ typedef struct {
  * @return              New repomd object.
  */
 LrYumRepoMd *
-lr_yum_repomd_init();
+lr_yum_repomd_init(void);
 
 /** Free repomd content and repomd object itself.
  * @param repomd        Repomd object.

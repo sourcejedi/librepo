@@ -1,6 +1,5 @@
 import sys
 import time
-import gpgme
 import shutil
 import os.path
 import tempfile
@@ -8,7 +7,7 @@ import unittest
 
 import librepo
 
-from tests.base import TestCaseWithFlask, TEST_DATA
+from tests.base import Context, TestCaseWithFlask, TEST_DATA
 from tests.servermock.server import app
 import tests.servermock.yum_mock.config as config
 
@@ -23,16 +22,15 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
         gpghome = os.path.join(self.tmpdir, "keyring")
         os.mkdir(gpghome, 0o700)
         os.environ['GNUPGHOME'] = gpghome
-        self.ctx = gpgme.Context()
-        self.ctx.import_(open(PUB_KEY, 'rb'))
+        self.ctx = Context()
+        self.ctx.op_import(open(PUB_KEY, 'rb'))
 
     def tearDown(self):
-        self.ctx.delete(self.ctx.get_key('22F2C4E9'))
         if self._gnupghome is None:
             os.environ.pop('GNUPGHOME')
         else:
             os.environ['GNUPGHOME'] = self._gnupghome
-        shutil.rmtree(self.tmpdir)
+        shutil.rmtree(self.tmpdir, True)
 
     def test_download_repo_01(self):
         h = librepo.Handle()
@@ -69,12 +67,15 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
               'metalink': None}
         )
 
+        self.maxDiff = None
         self.assertEqual(yum_repomd,
             {   'content_tags': [],
                 #'deltainfo': None,
                 'distro_tags': [],
                 'filelists': {
                     'checksum': 'aeca08fccd3c1ab831e1df1a62711a44ba1922c9',
+                    'header_checksum': None,
+                    'header_checksum_type': None,
                     'checksum_open': '52d30ae3162ca863c63c345ffdb7f0e10c1414a5',
                     'checksum_open_type': 'sha1',
                     'checksum_type': 'sha1',
@@ -85,6 +86,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                     'timestamp': 1347459930},
                 'filelists_db': {
                     'checksum': '4034dcea76c94d3f7a9616779539a4ea8cac288f',
+                    'header_checksum': None,
+                    'header_checksum_type': None,
                     'checksum_open': '949c6b7b605b2bc66852630c841a5003603ca5b2',
                     'checksum_open_type': 'sha1',
                     'checksum_type': 'sha1',
@@ -98,6 +101,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                 #'origin': None,
                 'other': {
                     'checksum': 'a8977cdaa0b14321d9acfab81ce8a85e869eee32',
+                    'header_checksum': None,
+                    'header_checksum_type': None,
                     'checksum_open': '4b5b8874fb233a626b03b3260a1aa08dce90e81a',
                     'checksum_open_type': 'sha1',
                     'checksum_type': 'sha1',
@@ -108,6 +113,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                     'timestamp': 1347459930},
                 'other_db': {
                     'checksum': 'fd96942c919628895187778633001cff61e872b8',
+                    'header_checksum': None,
+                    'header_checksum_type': None,
                     'checksum_open': 'c5262f62b6b3360722b9b2fb5d0a9335d0a51112',
                     'checksum_open_type': 'sha1',
                     'checksum_type': 'sha1',
@@ -119,6 +126,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                 #'prestodelta': None,
                 'primary': {
                     'checksum': '4543ad62e4d86337cd1949346f9aec976b847b58',
+                    'header_checksum': None,
+                    'header_checksum_type': None,
                     'checksum_open': '68457ceb8e20bda004d46e0a4dfa4a69ce71db48',
                     'checksum_open_type': 'sha1',
                     'checksum_type': 'sha1',
@@ -129,6 +138,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                     'timestamp': 1347459930},
                 'primary_db': {
                     'checksum': '735cd6294df08bdf28e2ba113915ca05a151118e',
+                    'header_checksum': None,
+                    'header_checksum_type': None,
                     'checksum_open': 'ba636386312e1b597fc4feb182d04c059b2a77d5',
                     'checksum_open_type': 'sha1',
                     'checksum_type': 'sha1',
@@ -194,6 +205,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                 'records': {
                     'primary': {
                         'checksum': '4543ad62e4d86337cd1949346f9aec976b847b58',
+                        'header_checksum': None,
+                        'header_checksum_type': None,
                         'checksum_open': '68457ceb8e20bda004d46e0a4dfa4a69ce71db48',
                         'checksum_open_type': 'sha1',
                         'checksum_type': 'sha1',
@@ -204,6 +217,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                         'timestamp': 1347459930},
                     'primary_db': {
                         'checksum': '735cd6294df08bdf28e2ba113915ca05a151118e',
+                        'header_checksum': None,
+                        'header_checksum_type': None,
                         'checksum_open': 'ba636386312e1b597fc4feb182d04c059b2a77d5',
                         'checksum_open_type': 'sha1',
                         'checksum_type': 'sha1',
@@ -214,6 +229,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                         'timestamp': 1347459931},
                     'filelists': {
                         'checksum': 'aeca08fccd3c1ab831e1df1a62711a44ba1922c9',
+                        'header_checksum': None,
+                        'header_checksum_type': None,
                         'checksum_open': '52d30ae3162ca863c63c345ffdb7f0e10c1414a5',
                         'checksum_open_type': 'sha1',
                         'checksum_type': 'sha1',
@@ -224,6 +241,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                         'timestamp': 1347459930},
                     'filelists_db': {
                         'checksum': '4034dcea76c94d3f7a9616779539a4ea8cac288f',
+                        'header_checksum': None,
+                        'header_checksum_type': None,
                         'checksum_open': '949c6b7b605b2bc66852630c841a5003603ca5b2',
                         'checksum_open_type': 'sha1',
                         'checksum_type': 'sha1',
@@ -234,6 +253,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                         'timestamp': 1347459931},
                     'other': {
                         'checksum': 'a8977cdaa0b14321d9acfab81ce8a85e869eee32',
+                        'header_checksum': None,
+                        'header_checksum_type': None,
                         'checksum_open': '4b5b8874fb233a626b03b3260a1aa08dce90e81a',
                         'checksum_open_type': 'sha1',
                         'checksum_type': 'sha1',
@@ -244,6 +265,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                         'timestamp': 1347459930},
                     'other_db': {
                         'checksum': 'fd96942c919628895187778633001cff61e872b8',
+                        'header_checksum': None,
+                        'header_checksum_type': None,
                         'checksum_open': 'c5262f62b6b3360722b9b2fb5d0a9335d0a51112',
                         'checksum_open_type': 'sha1',
                         'checksum_type': 'sha1',
@@ -305,6 +328,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
         self.assertEqual(yum_repomd,
             {'content_tags': ['binary-i386'],
              'deltainfo': {'checksum': '32d3307b672abf7356061912fa3dc9b54071c03a75c671111c1c8daf5ed1eb7e',
+                           'header_checksum': None,
+                           'header_checksum_type': None,
                            'checksum_open': '8a35a38aef926fd88f479f03a9a22e1ab7aa8bd1aeaa9d05cd696f101eee2846',
                            'checksum_open_type': 'sha256',
                            'checksum_type': 'sha256',
@@ -315,6 +340,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                            'timestamp': 1355335029},
              'distro_tags': [('cpe:/o:fedoraproject:fedora:17', 'r')],
              'filelists': {'checksum': '2431efa18b5de6bfddb87da2a526362108226752d46ef3a298cd4bf39ba16b1d',
+                           'header_checksum': None,
+                           'header_checksum_type': None,
                            'checksum_open': 'afa4a01d7a692ab8105a39fed5535b5011f0c68de0efbc98f9d6ffea36de85fe',
                            'checksum_open_type': 'sha256',
                            'checksum_type': 'sha256',
@@ -324,6 +351,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                            'size_open': 735112,
                            'timestamp': 1355393567},
              'filelists_db': {'checksum': '5b37f89f9f4474801ec5f23dc30d3d6cf9cf663cb75a6656aaa864a041836ffe',
+                              'header_checksum': None,
+                              'header_checksum_type': None,
                               'checksum_open': '8239ecd9334a3bc4dfa9a242f7c4d545b08451a1ad468458e20f3d3f768652c3',
                               'checksum_open_type': 'sha256',
                               'checksum_type': 'sha256',
@@ -333,6 +362,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                               'size_open': 200704,
                               'timestamp': 1355393568},
              'group': {'checksum': '5b3b362d644e8fa3b359db57be0ff5de8a08365ce9a59cddc3205244a968231e',
+                       'header_checksum': None,
+                       'header_checksum_type': None,
                        'checksum_open': None,
                        'checksum_open_type': None,
                        'checksum_type': 'sha256',
@@ -342,6 +373,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                        'size_open': 0,
                        'timestamp': 1355393567},
              'group_gz': {'checksum': 'c395ae7d8a9117f4e81aa23e37fb9da9865b50917f5f701b50d422875bb0cb14',
+                          'header_checksum': None,
+                          'header_checksum_type': None,
                           'checksum_open': '5b3b362d644e8fa3b359db57be0ff5de8a08365ce9a59cddc3205244a968231e',
                           'checksum_open_type': 'sha256',
                           'checksum_type': 'sha256',
@@ -351,6 +384,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                           'size_open': 679,
                           'timestamp': 1355393567},
              'origin': {'checksum': 'c949d2b2371fab1a03d03b41057004caf1133a56e4c9236f63b3163ad358c941',
+                        'header_checksum': None,
+                        'header_checksum_type': None,
                         'checksum_open': '3928c6aadcfdff101f4482db68c0d07f5777b1c7ad8424e41358bc5e87b8465b',
                         'checksum_open_type': 'sha256',
                         'checksum_type': 'sha256',
@@ -360,6 +395,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                         'size_open': 364,
                         'timestamp': 1355315696},
              'other': {'checksum': '76b2cfb04531a66e382f187e6a7c90905940d2b2f315b7fd738b839887d83c35',
+                       'header_checksum': None,
+                       'header_checksum_type': None,
                        'checksum_open': '2169e09e2c6c91393d38866c501a8697d0a1d698dd3b1027969dc16d291d8915',
                        'checksum_open_type': 'sha256',
                        'checksum_type': 'sha256',
@@ -369,6 +406,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                        'size_open': 1934,
                        'timestamp': 1355393567},
              'other_db': {'checksum': '705a58b0e169bf1d2ade8e4aacc515086644ce16cee971906f920c798c5b17d0',
+                          'header_checksum': None,
+                          'header_checksum_type': None,
                           'checksum_open': '916ca5e879387dc1da51b57266bda28a2569d1773ca6c8ea80abe99d9adb373e',
                           'checksum_open_type': 'sha256',
                           'checksum_type': 'sha256',
@@ -378,6 +417,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                           'size_open': 8192,
                           'timestamp': 1355393568},
              'prestodelta': {'checksum': '26e351e1a38eb1524574e86ab130ea4db780aa1a4a8bb741d37595ed203f931c',
+                             'header_checksum': None,
+                             'header_checksum_type': None,
                              'checksum_open': '0052b222add25fed094793c24e73aa07fd598f43f73c1643de26c5e81f6d8c07',
                              'checksum_open_type': 'sha256',
                              'checksum_type': 'sha256',
@@ -387,6 +428,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                              'size_open': 574,
                              'timestamp': 1337937059},
              'primary': {'checksum': '5a8e6bbb940b151103b3970a26e32b8965da9e90a798b1b80ee4325308149d8d',
+                         'header_checksum': None,
+                         'header_checksum_type': None,
                          'checksum_open': 'b8d60e74c38b94f255c08c3fe5e10c166dcb52f2c4bfec6cae097a68fdd75e74',
                          'checksum_open_type': 'sha256',
                          'checksum_type': 'sha256',
@@ -396,6 +439,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                          'size_open': 3411,
                          'timestamp': 1355393567},
              'primary_db': {'checksum': 'a09c42730c03b0d5defa3fd9213794c49e9bafbc67acdd8d4e87a2adf30b8752',
+                            'header_checksum': None,
+                            'header_checksum_type': None,
                             'checksum_open': '27b2200efa2c518e5dd5a59deb9ab33c2abca74cb74f5241e612b15931dcec37',
                             'checksum_open_type': 'sha256',
                             'checksum_type': 'sha256',
@@ -407,6 +452,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
              'repo_tags': ['test'],
              'revision': '1355393568',
              'updateinfo': {'checksum': '65c4f66e2808d328890505c3c2f13bb35a96f457d1c21a6346191c4dc07e6080',
+                            'header_checksum': None,
+                            'header_checksum_type': None,
                             'checksum_open': 'ded9c95e1b88197c906603b5d9693c579cb0afeade3bc7f8ec6cae06b962477d',
                             'checksum_open_type': 'sha256',
                             'checksum_type': 'sha256',
@@ -414,7 +461,8 @@ class TestCaseYumRepoDownloading(TestCaseWithFlask):
                             'location_href': 'repodata/65c4f66e2808d328890505c3c2f13bb35a96f457d1c21a6346191c4dc07e6080-updateinfo.xml.gz',
                             'size': 55,
                             'size_open': 42,
-                            'timestamp': 1354188048}}
+                            'timestamp': 1354188048}
+             }
         )
 
         # Test if all mentioned files really exist

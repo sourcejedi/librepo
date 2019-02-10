@@ -19,7 +19,8 @@
  */
 
 #define _POSIX_SOURCE
-#define _BSD_SOURCE
+#define _DEFAULT_SOURCE
+#define  BITS_IN_BYTE 8
 
 #include <stdio.h>
 #include <assert.h>
@@ -27,28 +28,28 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
-#include <curl/curl.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <time.h>
+
+#ifdef WITH_ZCHUNK
+#include <zck.h>
+#endif /* WITH_ZCHUNK */
 
 #include "util.h"
 #include "metalink.h"
-#include "mirrorlist.h"
 #include "repomd.h"
 #include "downloader.h"
-#include "checksum.h"
 #include "handle_internal.h"
 #include "result_internal.h"
 #include "yum_internal.h"
 #include "gpg.h"
 #include "cleanup.h"
+#include "librepo.h"
 
 /* helper functions for YumRepo manipulation */
 
 LrYumRepo *
-lr_yum_repo_init()
+lr_yum_repo_init(void)
 {
     return lr_malloc0(sizeof(LrYumRepo));
 }
@@ -77,10 +78,29 @@ lr_yum_repo_free(LrYumRepo *repo)
     lr_free(repo);
 }
 
-const char *
-lr_yum_repo_path(LrYumRepo *repo, const char *type)
+static char *
+get_type(LrYumRepo *repo, const char *type)
+{
+    if (!repo->use_zchunk)
+        return g_strdup(type);
+
+    gchar *chk_type = g_strconcat(type, "_zck", NULL);
+
+    for (GSList *elem = repo->paths; elem; elem = g_slist_next(elem)) {
+        LrYumRepoPath *yumrepopath = elem->data;
+        assert(yumrepopath);
+        if (!strcmp(yumrepopath->type, chk_type))
+            return chk_type;
+    }
+    g_free(chk_type);
+    return g_strdup(type);
+}
+
+static const char *
+yum_repo_path(LrYumRepo *repo, const char *type)
 {
     assert(repo);
+
     for (GSList *elem = repo->paths; elem; elem = g_slist_next(elem)) {
         LrYumRepoPath *yumrepopath = elem->data;
         assert(yumrepopath);
@@ -88,6 +108,17 @@ lr_yum_repo_path(LrYumRepo *repo, const char *type)
             return yumrepopath->path;
     }
     return NULL;
+}
+
+const char *
+lr_yum_repo_path(LrYumRepo *repo, const char *type)
+{
+    assert(repo);
+
+    gchar *chk_type = get_type(repo, type);
+    const char *path = yum_repo_path(repo, chk_type);
+    g_free(chk_type);
+    return path;
 }
 
 /** Append path to the repository object.
@@ -140,6 +171,57 @@ compare_records(gconstpointer a, gconstpointer b)
     return g_strcmp0(type1, type2);
 }
 
+static void
+lr_yum_switch_to_zchunk(LrHandle *handle, LrYumRepoMd *repomd)
+{
+    if (handle->yumdlist) {
+        int x = 0;
+        while (handle->yumdlist[x]) {
+            char *check_type = g_strconcat(handle->yumdlist[x], "_zck", NULL);
+            assert(check_type);
+
+            /* Check whether we already want the zchunk version of this record */
+            int found = FALSE;
+            int y = 0;
+            while (handle->yumdlist[y]) {
+                if (y == x) {
+                    y++;
+                    continue;
+                }
+                if (strcmp(handle->yumdlist[y], check_type) == 0) {
+                    found = TRUE;
+                    break;
+                }
+                y++;
+            }
+            if (found) {
+                g_free(check_type);
+                x++;
+                continue;
+            }
+
+            found = FALSE;
+            /* Check whether the zchunk version of this record exists */
+            for (GSList *elem = repomd->records; elem; elem = g_slist_next(elem)) {
+                LrYumRepoMdRecord *record = elem->data;
+
+                if (strcmp(record->type, check_type) == 0) {
+                    g_debug("Found %s so using instead of %s", check_type,
+                            handle->yumdlist[x]);
+                    g_free(handle->yumdlist[x]);
+                    handle->yumdlist[x] = check_type;
+                    found = TRUE;
+                    break;
+                }
+            }
+            if (!found)
+                g_free(check_type);
+            x++;
+        }
+    }
+    return;
+}
+
 static gboolean
 lr_yum_repomd_record_enabled(LrHandle *handle, const char *type, GSList* records)
 {
@@ -181,22 +263,15 @@ lr_yum_repomd_record_enabled(LrHandle *handle, const char *type, GSList* records
     return TRUE;
 }
 
-/** Mirror Failure Callback Data
- */
-typedef struct CbData_s {
-    void *userdata;                 /*!< User data */
-    LrProgressCb progresscb;        /*!< Progress callback */
-    LrHandleMirrorFailureCb hmfcb;  /*!< Handle mirror failure callback */
-    char *metadata;                 /*!< "primary", "filelists", ... */
-} CbData;
-
 static CbData *cbdata_new(void *userdata,
+                          void *cbdata,
                           LrProgressCb progresscb,
                           LrHandleMirrorFailureCb hmfcb,
                           const char *metadata)
 {
     CbData *data = calloc(1, sizeof(*data));
     data->userdata = userdata;
+    data->cbdata = cbdata;
     data->progresscb = progresscb;
     data->hmfcb = hmfcb;
     data->metadata = g_strdup(metadata);
@@ -220,13 +295,300 @@ progresscb(void *clientp, double total_to_download, double downloaded)
     return LR_CB_OK;
 }
 
-static int
+int
 hmfcb(void *clientp, const char *msg, const char *url)
 {
     CbData *data = clientp;
     if (data->hmfcb)
         return data->hmfcb(data->userdata, msg, url, data->metadata);
     return LR_CB_OK;
+}
+
+gboolean
+lr_prepare_repodata_dir(LrHandle *handle,
+                        GError **err)
+{
+    int rc;
+    int create_repodata_dir = 1;
+    char *path_to_repodata;
+
+    path_to_repodata = lr_pathconcat(handle->destdir, "repodata", NULL);
+
+    if (handle->update) {  /* Check if should create repodata/ subdir */
+        struct stat buf;
+        if (stat(path_to_repodata, &buf) != -1)
+            if (S_ISDIR(buf.st_mode))
+                create_repodata_dir = 0;
+    }
+
+    if (create_repodata_dir) {
+        /* Prepare repodata/ subdir */
+        rc = mkdir(path_to_repodata, S_IRWXU|S_IRWXG|S_IROTH|S_IXOTH);
+        if (rc == -1) {
+            g_debug("%s: Cannot create dir: %s (%s)",
+                    __func__, path_to_repodata, g_strerror(errno));
+            g_set_error(err, LR_YUM_ERROR, LRE_CANNOTCREATEDIR,
+                        "Cannot create directory: %s: %s",
+                        path_to_repodata, g_strerror(errno));
+            lr_free(path_to_repodata);
+            return FALSE;
+        }
+    }
+    lr_free(path_to_repodata);
+
+    return TRUE;
+}
+
+gboolean
+lr_store_mirrorlist_files(LrHandle *handle,
+                          LrYumRepo *repo,
+                          GError **err)
+{
+    int fd;
+    int rc;
+
+    if (handle->mirrorlist_fd != -1) {
+        char *ml_file_path = lr_pathconcat(handle->destdir,
+                                           "mirrorlist", NULL);
+        fd = open(ml_file_path, O_CREAT|O_TRUNC|O_RDWR, 0666);
+        if (fd < 0) {
+            g_debug("%s: Cannot create: %s", __func__, ml_file_path);
+            g_set_error(err, LR_YUM_ERROR, LRE_IO,
+                        "Cannot create %s: %s", ml_file_path, g_strerror(errno));
+            lr_free(ml_file_path);
+            return FALSE;
+        }
+        rc = lr_copy_content(handle->mirrorlist_fd, fd);
+        close(fd);
+        if (rc != 0) {
+            g_debug("%s: Cannot copy content of mirrorlist file", __func__);
+            g_set_error(err, LR_YUM_ERROR, LRE_IO,
+                        "Cannot copy content of mirrorlist file %s: %s",
+                        ml_file_path, g_strerror(errno));
+            lr_free(ml_file_path);
+            return FALSE;
+        }
+        repo->mirrorlist = ml_file_path;
+    }
+
+    return TRUE;
+}
+
+gboolean
+lr_copy_metalink_content(LrHandle *handle,
+                         LrYumRepo *repo,
+                         GError **err)
+{
+    int fd;
+    int rc;
+
+    if (handle->metalink_fd != -1) {
+        char *ml_file_path = lr_pathconcat(handle->destdir,
+                                           "metalink.xml", NULL);
+        fd = open(ml_file_path, O_CREAT|O_TRUNC|O_RDWR, 0666);
+        if (fd < 0) {
+            g_debug("%s: Cannot create: %s", __func__, ml_file_path);
+            g_set_error(err, LR_YUM_ERROR, LRE_IO,
+                        "Cannot create %s: %s", ml_file_path, g_strerror(errno));
+            lr_free(ml_file_path);
+            return FALSE;
+        }
+        rc = lr_copy_content(handle->metalink_fd, fd);
+        close(fd);
+        if (rc != 0) {
+            g_debug("%s: Cannot copy content of metalink file", __func__);
+            g_set_error(err, LR_YUM_ERROR, LRE_IO,
+                        "Cannot copy content of metalink file %s: %s",
+                        ml_file_path, g_strerror(errno));
+            lr_free(ml_file_path);
+            return FALSE;
+        }
+        repo->metalink = ml_file_path;
+    }
+
+    return TRUE;
+}
+
+int
+lr_prepare_repomd_xml_file(LrHandle *handle,
+                           char **path,
+                           GError **err)
+{
+    int fd;
+
+    *path = lr_pathconcat(handle->destdir, "/repodata/repomd.xml", NULL);
+    fd = open(*path, O_CREAT|O_TRUNC|O_RDWR, 0666);
+    if (fd == -1) {
+        g_set_error(err, LR_YUM_ERROR, LRE_IO,
+                    "Cannot open %s: %s", *path, g_strerror(errno));
+        lr_free(*path);
+        return -1;
+    }
+
+    return fd;
+}
+
+/** Check repomd.xml.asc if available.
+ * Try to download and verify GPG signature (repomd.xml.asc).
+ * Try to download only from the mirror where repomd.xml itself was
+ * downloaded. It is because most of yum repositories are not signed
+ * and try every mirror for signature is non effective.
+ * Every mirror would be tried because mirrored_download function have
+ * no clue if 404 for repomd.xml.asc means that no signature exists or
+ * it is just error on the mirror and should try the next one.
+ **/
+gboolean
+lr_check_repomd_xml_asc_availability(LrHandle *handle,
+                                     LrYumRepo *repo,
+                                     int fd,
+                                     char *path,
+                                     GError **err)
+{
+    GError *tmp_err = NULL;
+    gboolean ret;
+
+    if (handle->checks & LR_CHECK_GPG) {
+        int fd_sig;
+        char *url, *signature;
+
+        signature = lr_pathconcat(handle->destdir, "repodata/repomd.xml.asc", NULL);
+        fd_sig = open(signature, O_CREAT | O_TRUNC | O_RDWR, 0666);
+        if (fd_sig == -1) {
+            g_debug("%s: Cannot open: %s", __func__, signature);
+            g_set_error(err, LR_YUM_ERROR, LRE_IO,
+                        "Cannot open %s: %s", signature, g_strerror(errno));
+            close(fd);
+            lr_free(path);
+            lr_free(signature);
+            return FALSE;
+        }
+
+        url = lr_pathconcat(handle->used_mirror, "repodata/repomd.xml.asc", NULL);
+        ret = lr_download_url(handle, url, fd_sig, &tmp_err);
+        lr_free(url);
+        close(fd_sig);
+        if (!ret) {
+            // Signature doesn't exist
+            g_debug("%s: GPG signature doesn't exists: %s",
+                    __func__, tmp_err->message);
+            g_set_error(err, LR_YUM_ERROR, LRE_BADGPG,
+                        "GPG verification is enabled, but GPG signature "
+                                "repomd.xml.asc is not available: %s", tmp_err->message);
+            g_clear_error(&tmp_err);
+            unlink(signature);
+            lr_free(signature);
+            return FALSE;
+        } else {
+            // Signature downloaded
+            repo->signature = g_strdup(signature);
+            ret = lr_gpg_check_signature(signature,
+                                         path,
+                                         handle->gnupghomedir,
+                                         &tmp_err);
+            lr_free(signature);
+            if (!ret) {
+                g_debug("%s: GPG signature verification failed: %s",
+                        __func__, tmp_err->message);
+                g_propagate_prefixed_error(err, tmp_err,
+                                           "repomd.xml GPG signature verification error: ");
+                close(fd);
+                lr_free(path);
+                return FALSE;
+            }
+            g_debug("%s: GPG signature successfully verified", __func__);
+        }
+    }
+
+    return TRUE;
+}
+
+void
+lr_get_best_checksum(const LrMetalink *metalink,
+                     GSList **checksums)
+{
+    gboolean ret;
+    LrChecksumType ch_type;
+    gchar *ch_value;
+
+    // From the metalink itself
+    ret = lr_best_checksum(metalink->hashes, &ch_type, &ch_value);
+    if (ret)
+    {
+        LrDownloadTargetChecksum *dtch;
+        dtch = lr_downloadtargetchecksum_new(ch_type, ch_value);
+        *checksums = g_slist_prepend(*checksums, dtch);
+        g_debug("%s: Expected checksum for repomd.xml: (%s) %s",
+                __func__, lr_checksum_type_to_str(ch_type), ch_value);
+    }
+
+    // From the alternates entries
+    for (GSList *elem = metalink->alternates; elem; elem = g_slist_next(elem))
+    {
+        LrMetalinkAlternate *alt = elem->data;
+        ret = lr_best_checksum(alt->hashes, &ch_type, &ch_value);
+        if (ret) {
+            LrDownloadTargetChecksum *dtch;
+            dtch = lr_downloadtargetchecksum_new(ch_type, ch_value);
+            *checksums = g_slist_prepend(*checksums, dtch);
+            g_debug("%s: Expected alternate checksum for repomd.xml: (%s) %s",
+                    __func__, lr_checksum_type_to_str(ch_type), ch_value);
+        }
+    }
+}
+
+CbData *
+lr_get_metadata_failure_callback(const LrHandle *handle)
+{
+    CbData *cbdata = NULL;
+    if (handle->hmfcb) {
+        cbdata = cbdata_new(handle->user_data,
+                            NULL,
+                            NULL,
+                            handle->hmfcb,
+                            "repomd.xml");
+    }
+    return cbdata;
+}
+
+gboolean
+lr_yum_download_url(LrHandle *lr_handle, const char *url, int fd,
+                    gboolean no_cache, gboolean is_zchunk, GError **err)
+{
+    gboolean ret;
+    LrDownloadTarget *target;
+    GError *tmp_err = NULL;
+
+    assert(url);
+    assert(!err || *err == NULL);
+
+    CbData *cbdata = cbdata_new(lr_handle->user_data,
+                                NULL,
+                                lr_handle->user_cb,
+                                lr_handle->hmfcb,
+                                url);
+
+    // Prepare target
+    target = lr_downloadtarget_new(lr_handle,
+                                   url, NULL, fd, NULL,
+                                   NULL, 0, 0,(lr_handle->user_cb) ? progresscb : NULL, cbdata,
+                                   NULL, (lr_handle->hmfcb) ? hmfcb : NULL, NULL, 0, 0,
+                                   NULL, no_cache, is_zchunk);
+
+    // Download the target
+    ret = lr_download_target(target, &tmp_err);
+
+    assert(ret || tmp_err);
+    assert(!(target->err) || !ret);
+    cbdata_free(cbdata);
+
+    if (!ret)
+        g_propagate_error(err, tmp_err);
+
+    lr_downloadtarget_free(target);
+
+    lseek(fd, 0, SEEK_SET);
+
+    return ret;
 }
 
 static gboolean
@@ -244,43 +606,14 @@ lr_yum_download_repomd(LrHandle *handle,
 
     GSList *checksums = NULL;
     if (metalink && (handle->checks & LR_CHECK_CHECKSUM)) {
-        // Select best checksum
-
-        gboolean ret;
-        LrChecksumType ch_type;
-        gchar *ch_value;
-
-        // From the metalink itself
-        ret = lr_best_checksum(metalink->hashes, &ch_type, &ch_value);
-        if (ret) {
-            LrDownloadTargetChecksum *dtch;
-            dtch = lr_downloadtargetchecksum_new(ch_type, ch_value);
-            checksums = g_slist_prepend(checksums, dtch);
-            g_debug("%s: Expected checksum for repomd.xml: (%s) %s",
-                    __func__, lr_checksum_type_to_str(ch_type), ch_value);
-        }
-
-        // From the alternates entries
-        for (GSList *elem = metalink->alternates; elem; elem = g_slist_next(elem)) {
-            LrMetalinkAlternate *alt = elem->data;
-            ret = lr_best_checksum(alt->hashes, &ch_type, &ch_value);
-            if (ret) {
-                LrDownloadTargetChecksum *dtch;
-                dtch = lr_downloadtargetchecksum_new(ch_type, ch_value);
-                checksums = g_slist_prepend(checksums, dtch);
-                g_debug("%s: Expected alternate checksum for repomd.xml: (%s) %s",
-                        __func__, lr_checksum_type_to_str(ch_type), ch_value);
-            }
-        }
+        lr_get_best_checksum(metalink, &checksums);
     }
 
-    CbData *cbdata = NULL;
-    if (handle->hmfcb) {
-        cbdata = cbdata_new(handle->user_data,
+    CbData *cbdata = cbdata_new(handle->user_data,
                             NULL,
+                            handle->user_cb,
                             handle->hmfcb,
                             "repomd.xml");
-    }
 
     LrDownloadTarget *target = lr_downloadtarget_new(handle,
                                                      "repodata/repomd.xml",
@@ -290,14 +623,16 @@ lr_yum_download_repomd(LrHandle *handle,
                                                      checksums,
                                                      0,
                                                      0,
-                                                     NULL,
+                                                     (handle->user_cb) ? progresscb : NULL,
                                                      cbdata,
                                                      NULL,
-                                                     (cbdata) ? hmfcb : NULL,
+                                                     (handle->hmfcb) ? hmfcb : NULL,
                                                      NULL,
                                                      0,
                                                      0,
-                                                     TRUE);
+                                                     NULL,
+                                                     TRUE,
+                                                     FALSE);
 
     ret = lr_download_target(target, &tmp_err);
     assert((ret && !tmp_err) || (!ret && tmp_err));
@@ -330,22 +665,95 @@ lr_yum_download_repomd(LrHandle *handle,
     return ret;
 }
 
-static gboolean
-lr_yum_download_repo(LrHandle *handle,
-                     LrYumRepo *repo,
-                     LrYumRepoMd *repomd,
-                     GError **err)
+gboolean
+prepare_repo_download_std_target(LrHandle *handle,
+                                 LrYumRepoMdRecord *record,
+                                 char **path,
+                                 int *fd,
+                                 GSList **checksums,
+                                 GSList **targets,
+                                 GError **err)
 {
-    gboolean ret = TRUE;
+    *path = lr_pathconcat(handle->destdir, record->location_href, NULL);
+    *fd = open(*path, O_CREAT|O_TRUNC|O_RDWR, 0666);
+    if (*fd < 0) {
+        g_debug("%s: Cannot create/open %s (%s)",
+                __func__, *path, g_strerror(errno));
+        g_set_error(err, LR_YUM_ERROR, LRE_IO,
+                    "Cannot create/open %s: %s", *path, g_strerror(errno));
+        lr_free(*path);
+        g_slist_free_full(*targets, (GDestroyNotify) lr_downloadtarget_free);
+        return FALSE;
+    }
+
+    if (handle->checks & LR_CHECK_CHECKSUM) {
+        // Select proper checksum type only if checksum check is enabled
+        LrDownloadTargetChecksum *checksum;
+        checksum = lr_downloadtargetchecksum_new(
+                       lr_checksum_type(record->checksum_type),
+                       record->checksum);
+        *checksums = g_slist_prepend(*checksums, checksum);
+    }
+    return TRUE;
+}
+
+#ifdef WITH_ZCHUNK
+gboolean
+prepare_repo_download_zck_target(LrHandle *handle,
+                                 LrYumRepoMdRecord *record,
+                                 char **path,
+                                 int *fd,
+                                 GSList **checksums,
+                                 GSList **targets,
+                                 GError **err)
+{
+    *path = lr_pathconcat(handle->destdir, record->location_href, NULL);
+    *fd = open(*path, O_CREAT|O_RDWR, 0666);
+    if (*fd < 0) {
+        g_debug("%s: Cannot create/open %s (%s)",
+                __func__, *path, g_strerror(errno));
+        g_set_error(err, LR_YUM_ERROR, LRE_IO,
+                    "Cannot create/open %s: %s", *path, g_strerror(errno));
+        lr_free(*path);
+        g_slist_free_full(*targets, (GDestroyNotify) lr_downloadtarget_free);
+        return FALSE;
+    }
+
+    if (handle->checks & LR_CHECK_CHECKSUM) {
+        // Select proper checksum type only if checksum check is enabled
+        LrDownloadTargetChecksum *checksum;
+        checksum = lr_downloadtargetchecksum_new(
+                       lr_checksum_type(record->header_checksum_type),
+                       record->header_checksum);
+        *checksums = g_slist_prepend(*checksums, checksum);
+    }
+    return TRUE;
+}
+#endif /* WITH_ZCHUNK */
+
+gboolean
+prepare_repo_download_targets(LrHandle *handle,
+                              LrYumRepo *repo,
+                              LrYumRepoMd *repomd,
+                              LrMetadataTarget *mdtarget,
+                              GSList **targets,
+                              GSList **cbdata_list,
+                              GError **err)
+{
     char *destdir;  /* Destination dir */
-    GSList *targets = NULL;
-    GSList *cbdata_list = NULL;
-    GError *tmp_err = NULL;
 
     destdir = handle->destdir;
     assert(destdir);
     assert(strlen(destdir));
     assert(!err || *err == NULL);
+
+    if(handle->cachedir) {
+        lr_yum_switch_to_zchunk(handle, repomd);
+        repo->use_zchunk = TRUE;
+    } else {
+        g_debug("%s: Cache directory not set, disabling zchunk", __func__);
+        repo->use_zchunk = FALSE;
+    }
 
     for (GSList *elem = repomd->records; elem; elem = g_slist_next(elem)) {
         int fd;
@@ -353,44 +761,50 @@ lr_yum_download_repo(LrHandle *handle,
         LrDownloadTarget *target;
         LrYumRepoMdRecord *record = elem->data;
         CbData *cbdata = NULL;
+        void *user_cbdata = NULL;
+        LrEndCb endcb = NULL;
+
+        if (mdtarget != NULL) {
+            user_cbdata = mdtarget->cbdata;
+            endcb = mdtarget->endcb;
+        }
 
         assert(record);
 
         if (!lr_yum_repomd_record_enabled(handle, record->type, repomd->records))
             continue;
 
-        path = lr_pathconcat(destdir, record->location_href, NULL);
-        fd = open(path, O_CREAT|O_TRUNC|O_RDWR, 0666);
-        if (fd < 0) {
-            g_debug("%s: Cannot create/open %s (%s)",
-                    __func__, path, g_strerror(errno));
-            g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                        "Cannot create/open %s: %s", path, g_strerror(errno));
-            lr_free(path);
-            g_slist_free_full(targets, (GDestroyNotify) lr_downloadtarget_free);
-            return FALSE;
-        }
+        char *location_href = record->location_href;
+        gboolean is_zchunk = FALSE;
+        #ifdef WITH_ZCHUNK
+        if (handle->cachedir && record->header_checksum)
+            is_zchunk = TRUE;
+        #endif /* WITH_ZCHUNK */
 
         GSList *checksums = NULL;
-        if (handle->checks & LR_CHECK_CHECKSUM) {
-            // Select proper checksum type only if checksum check is enabled
-            LrDownloadTargetChecksum *checksum;
-            checksum = lr_downloadtargetchecksum_new(
-                                    lr_checksum_type(record->checksum_type),
-                                    record->checksum);
-            checksums = g_slist_prepend(checksums, checksum);
+        if (is_zchunk) {
+            #ifdef WITH_ZCHUNK
+            if(!prepare_repo_download_zck_target(handle, record, &path, &fd,
+                                                 &checksums, targets, err))
+                return FALSE;
+            #endif /* WITH_ZCHUNK */
+        } else {
+            if(!prepare_repo_download_std_target(handle, record, &path, &fd,
+                                                 &checksums, targets, err))
+                return FALSE;
         }
 
         if (handle->user_cb || handle->hmfcb) {
             cbdata = cbdata_new(handle->user_data,
+                                user_cbdata,
                                 handle->user_cb,
                                 handle->hmfcb,
                                 record->type);
-            cbdata_list = g_slist_append(cbdata_list, cbdata);
+            *cbdata_list = g_slist_append(*cbdata_list, cbdata);
         }
 
         target = lr_downloadtarget_new(handle,
-                                       record->location_href,
+                                       location_href,
                                        record->location_base,
                                        fd,
                                        NULL,
@@ -399,36 +813,41 @@ lr_yum_download_repo(LrHandle *handle,
                                        0,
                                        NULL,
                                        cbdata,
-                                       NULL,
+                                       endcb,
                                        NULL,
                                        NULL,
                                        0,
                                        0,
-                                       FALSE);
+                                       NULL,
+                                       FALSE,
+                                       is_zchunk);
 
-        targets = g_slist_append(targets, target);
+        if(is_zchunk) {
+            #ifdef WITH_ZCHUNK
+            target->expectedsize = record->size_header;
+            target->zck_header_size = record->size_header;
+            #endif /* WITH_ZCHUNK */
+        }
+
+        if (mdtarget != NULL)
+            mdtarget->repomd_records_to_download++;
+        *targets = g_slist_append(*targets, target);
 
         /* Because path may already exists in repo (while update) */
         lr_yum_repo_update(repo, record->type, path);
         lr_free(path);
     }
 
-    if (!targets)
-        return TRUE;
+    return TRUE;
+}
 
-    ret = lr_download_single_cb(targets,
-                                FALSE,
-                                (cbdata_list) ? progresscb : NULL,
-                                (cbdata_list) ? hmfcb : NULL,
-                                &tmp_err);
-
-    // Error handling
-
-    assert((ret && !tmp_err) || (!ret && tmp_err));
-
-    if (tmp_err) {
-        g_propagate_prefixed_error(err, tmp_err,
+gboolean
+error_handling(GSList *targets, GError **dest_error, GError *src_error)
+{
+    if (src_error) {
+        g_propagate_prefixed_error(dest_error, src_error,
                                    "Downloading error: ");
+        return FALSE;
     } else {
         int code = LRE_OK;
         char *error_summary = NULL;
@@ -458,12 +877,86 @@ lr_yum_download_repo(LrHandle *handle,
 
         if (code != LRE_OK) {
             // At least one target failed
-            ret = FALSE;
-            g_set_error(err, LR_DOWNLOADER_ERROR, code,
+            g_set_error(dest_error, LR_DOWNLOADER_ERROR, code,
                         "Downloading error(s): %s", error_summary);
             g_free(error_summary);
+            return FALSE;
         }
     }
+
+    return TRUE;
+}
+
+gboolean
+lr_yum_download_repos(GSList *targets,
+                      GError **err)
+{
+    gboolean ret;
+    GSList *download_targets = NULL;
+    GSList *cbdata_list = NULL;
+    GError *download_error = NULL;
+
+    for (GSList *elem = targets; elem; elem = g_slist_next(elem)) {
+        LrMetadataTarget *target = elem->data;
+
+        if (!target->handle) {
+            continue;
+        }
+
+        prepare_repo_download_targets(target->handle,
+                                      target->repo,
+                                      target->repomd,
+                                      target,
+                                      &download_targets,
+                                      &cbdata_list,
+                                      &download_error);
+    }
+
+    if (!download_targets) {
+        g_propagate_error(err, download_error);
+        return TRUE;
+    }
+
+    ret = lr_download_single_cb(download_targets,
+                                FALSE,
+                                (cbdata_list) ? progresscb : NULL,
+                                (cbdata_list) ? hmfcb : NULL,
+                                &download_error);
+
+    error_handling(download_targets, err, download_error);
+
+    g_slist_free_full(cbdata_list, (GDestroyNotify)cbdata_free);
+    g_slist_free_full(download_targets, (GDestroyNotify)lr_downloadtarget_free);
+
+    return ret;
+}
+
+gboolean
+lr_yum_download_repo(LrHandle *handle,
+                     LrYumRepo *repo,
+                     LrYumRepoMd *repomd,
+                     GError **err)
+{
+    gboolean ret = TRUE;
+    GSList *targets = NULL;
+    GSList *cbdata_list = NULL;
+    GError *tmp_err = NULL;
+
+    assert(!err || *err == NULL);
+
+    prepare_repo_download_targets(handle, repo, repomd, NULL, &targets, &cbdata_list, err);
+
+    if (!targets)
+        return TRUE;
+
+    ret = lr_download_single_cb(targets,
+                                FALSE,
+                                (cbdata_list) ? progresscb : NULL,
+                                (cbdata_list) ? hmfcb : NULL,
+                                &tmp_err);
+
+    assert((ret && !tmp_err) || (!ret && tmp_err));
+    ret = error_handling(targets, err, tmp_err);
 
     g_slist_free_full(cbdata_list, (GDestroyNotify)cbdata_free);
     g_slist_free_full(targets, (GDestroyNotify)lr_downloadtarget_free);
@@ -480,6 +973,7 @@ lr_yum_check_checksum_of_md_record(LrYumRepoMdRecord *rec,
     char *expected_checksum;
     LrChecksumType checksum_type;
     gboolean ret, matches;
+    gboolean is_zchunk = FALSE;
     GError *tmp_err = NULL;
 
     assert(!err || *err == NULL);
@@ -487,8 +981,18 @@ lr_yum_check_checksum_of_md_record(LrYumRepoMdRecord *rec,
     if (!rec || !path)
         return TRUE;
 
-    expected_checksum = rec->checksum;
-    checksum_type = lr_checksum_type(rec->checksum_type);
+    #ifdef WITH_ZCHUNK
+    if(rec->header_checksum) {
+        expected_checksum = rec->header_checksum;
+        checksum_type = lr_checksum_type(rec->header_checksum_type);
+        is_zchunk = TRUE;
+    } else {
+    #endif /* WITH_ZCHUNK */
+        expected_checksum = rec->checksum;
+        checksum_type = lr_checksum_type(rec->checksum_type);
+    #ifdef WITH_ZCHUNK
+    }
+    #endif /* WITH_ZCHUNK */
 
     g_debug("%s: Checking checksum of %s (expected: %s [%s])",
                        __func__, path, expected_checksum, rec->checksum_type);
@@ -500,10 +1004,9 @@ lr_yum_check_checksum_of_md_record(LrYumRepoMdRecord *rec,
     }
 
     if (checksum_type == LR_CHECKSUM_UNKNOWN) {
-        g_debug("%s: Unknown checksum: %s", __func__, rec->checksum_type);
+        g_debug("%s: Unknown checksum", __func__);
         g_set_error(err, LR_YUM_ERROR, LRE_UNKNOWNCHECKSUM,
-                    "Unknown checksum type \"%s\" for %s",
-                    rec->checksum_type, path);
+                    "Unknown checksum type for %s", path);
         return FALSE;
     }
 
@@ -515,12 +1018,32 @@ lr_yum_check_checksum_of_md_record(LrYumRepoMdRecord *rec,
         return FALSE;
     }
 
-    ret = lr_checksum_fd_cmp(checksum_type,
-                             fd,
-                             expected_checksum,
-                             1,
-                             &matches,
-                             &tmp_err);
+    if (is_zchunk) {
+        #ifdef WITH_ZCHUNK
+        ret = FALSE;
+        matches = FALSE;
+        zckCtx *zck = lr_zck_init_read_base(expected_checksum, checksum_type,
+                                            rec->size_header, fd, &tmp_err);
+        if (!tmp_err) {
+            if(zck_validate_checksums(zck) < 1) {
+                g_set_error(&tmp_err, LR_YUM_ERROR, LRE_ZCK,
+                            "Unable to validate zchunk checksums");
+            } else {
+                ret = TRUE;
+                matches = TRUE;
+            }
+        }
+        if (zck)
+            zck_free(&zck);
+        #endif /* WITH_ZCHUNK */
+    } else {
+        ret = lr_checksum_fd_cmp(checksum_type,
+                                 fd,
+                                 expected_checksum,
+                                 1,
+                                 &matches,
+                                 &tmp_err);
+    }
 
     close(fd);
 
@@ -558,7 +1081,8 @@ lr_yum_check_repo_checksums(LrYumRepo *repo,
 
         assert(record);
 
-        const char *path = lr_yum_repo_path(repo, record->type);
+        const char *path = yum_repo_path(repo, record->type);
+
         ret = lr_yum_check_checksum_of_md_record(record, path, err);
         if (!ret)
             return FALSE;
@@ -704,6 +1228,14 @@ lr_yum_use_local(LrHandle *handle, LrResult *result, GError **err)
             return FALSE;
     }
 
+    if(handle->cachedir) {
+        lr_yum_switch_to_zchunk(handle, repomd);
+        repo->use_zchunk = TRUE;
+    } else {
+        g_debug("%s: Cache directory not set, disabling zchunk", __func__);
+        repo->use_zchunk = FALSE;
+    }
+
     // Locate rest of metadata files
     for (GSList *elem = repomd->records; elem; elem = g_slist_next(elem)) {
         _cleanup_free_ char *path = NULL;
@@ -713,10 +1245,11 @@ lr_yum_use_local(LrHandle *handle, LrResult *result, GError **err)
 
         if (!lr_yum_repomd_record_enabled(handle, record->type, repomd->records))
             continue; // Caller isn't interested in this record type
-        if (lr_yum_repo_path(repo, record->type))
+        if (yum_repo_path(repo, record->type))
             continue; // This path already exists in repo
 
         path = lr_pathconcat(baseurl, record->location_href, NULL);
+
         if (access(path, F_OK) == -1) {
             // A repo file is missing
             if (!handle->ignoremissing) {
@@ -741,11 +1274,8 @@ lr_yum_use_local(LrHandle *handle, LrResult *result, GError **err)
 static gboolean
 lr_yum_download_remote(LrHandle *handle, LrResult *result, GError **err)
 {
-    int rc;
     gboolean ret = TRUE;
     int fd;
-    int create_repodata_dir = 1;
-    char *path_to_repodata;
     LrYumRepo *repo;
     LrYumRepoMd *repomd;
     GError *tmp_err = NULL;
@@ -757,91 +1287,20 @@ lr_yum_download_remote(LrHandle *handle, LrResult *result, GError **err)
 
     g_debug("%s: Downloading/Copying repo..", __func__);
 
-    path_to_repodata = lr_pathconcat(handle->destdir, "repodata", NULL);
-
-    if (handle->update) {  /* Check if should create repodata/ subdir */
-        struct stat buf;
-        if (stat(path_to_repodata, &buf) != -1)
-            if (S_ISDIR(buf.st_mode))
-                create_repodata_dir = 0;
-    }
-
-    if (create_repodata_dir) {
-        /* Prepare repodata/ subdir */
-        rc = mkdir(path_to_repodata, S_IRWXU|S_IRWXG|S_IROTH|S_IXOTH);
-        if (rc == -1) {
-            g_debug("%s: Cannot create dir: %s (%s)",
-                    __func__, path_to_repodata, g_strerror(errno));
-            g_set_error(err, LR_YUM_ERROR, LRE_CANNOTCREATEDIR,
-                        "Cannot create directory: %s: %s",
-                        path_to_repodata, g_strerror(errno));
-            lr_free(path_to_repodata);
-            return FALSE;
-        }
-    }
-    lr_free(path_to_repodata);
+    if (!lr_prepare_repodata_dir(handle, err))
+        return FALSE;
 
     if (!handle->update) {
-        char *path;
+        char *path = NULL;
 
-        /* Store mirrorlist file(s) */
-        if (handle->mirrorlist_fd != -1) {
-            char *ml_file_path = lr_pathconcat(handle->destdir,
-                                               "mirrorlist", NULL);
-            fd = open(ml_file_path, O_CREAT|O_TRUNC|O_RDWR, 0666);
-            if (fd < 0) {
-                g_debug("%s: Cannot create: %s", __func__, ml_file_path);
-                g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                        "Cannot create %s: %s", ml_file_path, g_strerror(errno));
-                lr_free(ml_file_path);
-                return FALSE;
-            }
-            rc = lr_copy_content(handle->mirrorlist_fd, fd);
-            close(fd);
-            if (rc != 0) {
-                g_debug("%s: Cannot copy content of mirrorlist file", __func__);
-                g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                        "Cannot copy content of mirrorlist file %s: %s",
-                        ml_file_path, g_strerror(errno));
-                lr_free(ml_file_path);
-                return FALSE;
-            }
-            repo->mirrorlist = ml_file_path;
-        }
-
-        if (handle->metalink_fd != -1) {
-            char *ml_file_path = lr_pathconcat(handle->destdir,
-                                               "metalink.xml", NULL);
-            fd = open(ml_file_path, O_CREAT|O_TRUNC|O_RDWR, 0666);
-            if (fd < 0) {
-                g_debug("%s: Cannot create: %s", __func__, ml_file_path);
-                g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                        "Cannot create %s: %s", ml_file_path, g_strerror(errno));
-                lr_free(ml_file_path);
-                return FALSE;
-            }
-            rc = lr_copy_content(handle->metalink_fd, fd);
-            close(fd);
-            if (rc != 0) {
-                g_debug("%s: Cannot copy content of metalink file", __func__);
-                g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                        "Cannot copy content of metalink file %s: %s",
-                        ml_file_path, g_strerror(errno));
-                lr_free(ml_file_path);
-                return FALSE;
-            }
-            repo->metalink = ml_file_path;
-        }
-
-        /* Prepare repomd.xml file */
-        path = lr_pathconcat(handle->destdir, "/repodata/repomd.xml", NULL);
-        fd = open(path, O_CREAT|O_TRUNC|O_RDWR, 0666);
-        if (fd == -1) {
-            g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                        "Cannot open %s: %s", path, g_strerror(errno));
-            lr_free(path);
+        if (!lr_store_mirrorlist_files(handle, repo, err))
             return FALSE;
-        }
+
+        if (!lr_copy_metalink_content(handle, repo, err))
+            return FALSE;
+
+        if ((fd = lr_prepare_repomd_xml_file(handle, &path, err)) == -1)
+            return FALSE;
 
         /* Download repomd.xml */
         ret = lr_yum_download_repomd(handle, handle->metalink, fd, err);
@@ -851,66 +1310,8 @@ lr_yum_download_remote(LrHandle *handle, LrResult *result, GError **err)
             return FALSE;
         }
 
-        /* Check repomd.xml.asc if available.
-         * Try to download and verify GPG signature (repomd.xml.asc).
-         * Try to download only from the mirror where repomd.xml iself was
-         * downloaded. It is because most of yum repositories are not signed
-         * and try every mirror for signature is non effective.
-         * Every mirror would be tried because mirrorded_download function have
-         * no clue if 404 for repomd.xml.asc means that no signature exists or
-         * it is just error on the mirror and should try the next one.
-         **/
-        if (handle->checks & LR_CHECK_GPG) {
-            int fd_sig;
-            char *url, *signature;
-
-            signature = lr_pathconcat(handle->destdir, "repodata/repomd.xml.asc", NULL);
-            fd_sig = open(signature, O_CREAT|O_TRUNC|O_RDWR, 0666);
-            if (fd_sig == -1) {
-                g_debug("%s: Cannot open: %s", __func__, signature);
-                g_set_error(err, LR_YUM_ERROR, LRE_IO,
-                            "Cannot open %s: %s", signature, g_strerror(errno));
-                close(fd);
-                lr_free(path);
-                lr_free(signature);
-                return FALSE;
-            }
-
-            url = lr_pathconcat(handle->used_mirror, "repodata/repomd.xml.asc", NULL);
-            ret = lr_download_url(handle, url, fd_sig, &tmp_err);
-            lr_free(url);
-            close(fd_sig);
-            if (!ret) {
-                // Signature doesn't exist
-                g_debug("%s: GPG signature doesn't exists: %s",
-                        __func__, tmp_err->message);
-                g_set_error(err, LR_YUM_ERROR, LRE_BADGPG,
-                            "GPG verification is enabled, but GPG signature "
-                            "repomd.xml.asc is not available: %s", tmp_err->message);
-                g_clear_error(&tmp_err);
-                unlink(signature);
-                lr_free(signature);
-                return FALSE;
-            } else {
-                // Signature downloaded
-                repo->signature = g_strdup(signature);
-                ret = lr_gpg_check_signature(signature,
-                                             path,
-                                             handle->gnupghomedir,
-                                             &tmp_err);
-                lr_free(signature);
-                if (!ret) {
-                    g_debug("%s: GPG signature verification failed: %s",
-                            __func__, tmp_err->message);
-                    g_propagate_prefixed_error(err, tmp_err,
-                            "repomd.xml GPG signature verification error: ");
-                    close(fd);
-                    lr_free(path);
-                    return FALSE;
-                }
-                g_debug("%s: GPG signature successfully verified", __func__);
-            }
-        }
+        if (!lr_check_repomd_xml_asc_availability(handle, repo, fd, path, err))
+            return FALSE;
 
         lseek(fd, 0, SEEK_SET);
 

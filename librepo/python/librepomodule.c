@@ -25,6 +25,8 @@
 
 #include "exception-py.h"
 #include "handle-py.h"
+#include "metadatadownloader-py.h"
+#include "metadatatarget-py.h"
 #include "packagedownloader-py.h"
 #include "packagetarget-py.h"
 #include "result-py.h"
@@ -115,6 +117,8 @@ static struct PyMethodDef librepo_methods[] = {
     { "set_debug_log_handler",  (PyCFunction)py_set_debug_log_handler,
       METH_VARARGS, NULL },
     { "download_packages",      (PyCFunction)py_download_packages,
+      METH_VARARGS, NULL },
+    { "download_metadata",      (PyCFunction)py_download_metadata,
       METH_VARARGS, NULL },
     { "download_url",           (PyCFunction)py_download_url,
       METH_VARARGS, NULL },
@@ -223,6 +227,12 @@ init_librepo(void)
     Py_INCREF(&PackageTarget_Type);
     PyModule_AddObject(m, "PackageTarget", (PyObject *)&PackageTarget_Type);
 
+    // _librepo.MetadataTarget
+    if (PyType_Ready(&MetadataTarget_Type) < 0)
+        INITERROR;
+    Py_INCREF(&MetadataTarget_Type);
+    PyModule_AddObject(m, "MetadataTarget", (PyObject *)&MetadataTarget_Type);
+
     // Init module
     Py_AtExit(exit_librepo);
 
@@ -295,6 +305,7 @@ init_librepo(void)
     PYMODULE_ADDINTCONSTANT(LRO_HTTPAUTHMETHODS);
     PYMODULE_ADDINTCONSTANT(LRO_PROXYAUTHMETHODS);
     PYMODULE_ADDINTCONSTANT(LRO_FTPUSEEPSV);
+    PYMODULE_ADDINTCONSTANT(LRO_CACHEDIR);
     PYMODULE_ADDINTCONSTANT(LRO_SENTINEL);
 
     // Handle info options
@@ -340,6 +351,7 @@ init_librepo(void)
     PYMODULE_ADDINTCONSTANT(LRI_HTTPAUTHMETHODS);
     PYMODULE_ADDINTCONSTANT(LRI_PROXYAUTHMETHODS);
     PYMODULE_ADDINTCONSTANT(LRI_FTPUSEEPSV);
+    PYMODULE_ADDINTCONSTANT(LRI_CACHEDIR);
     PYMODULE_ADDINTCONSTANT(LRI_SENTINEL);
 
     // Check options

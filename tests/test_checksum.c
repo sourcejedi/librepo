@@ -1,12 +1,13 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <fcntl.h>
-#include <attr/xattr.h>
 
 #include "librepo/util.h"
 #include "librepo/checksum.h"
@@ -103,6 +104,7 @@ START_TEST(test_cached_checksum)
 
     filename = lr_pathconcat(test_globals.tmpdir, "/test_checksum", NULL);
     f = fopen(filename, "w");
+    fail_if(f == NULL);
     fwrite("foo\nbar\n", 1, 8, f);
     fclose(f);
 
