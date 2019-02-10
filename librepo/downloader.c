@@ -1374,7 +1374,6 @@ prepare_next_transfer(LrDownload *dd, gboolean *candidatefound, GError **err)
     _cleanup_free_ char *full_url = NULL;
     LrProtocol protocol = LR_PROTOCOL_OTHER;
     gboolean ret;
-    GError *tmp_err = NULL;
 
     assert(dd);
     assert(!err || *err == NULL);
